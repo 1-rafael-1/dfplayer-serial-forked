@@ -88,8 +88,7 @@ pub trait TimeSource {
 /// Represents available media sources on the DFPlayer
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
-#[cfg(feature = "defmt")]
-#[derive(defmt::Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Source {
     /// Internal USB flash storage
     USBFlash = 0b001,
@@ -114,8 +113,7 @@ impl TryFrom<u8> for Source {
 /// Error codes reported by the DFPlayer module
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
-#[cfg(feature = "defmt")]
-#[derive(defmt::Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ModuleError {
     /// Module is currently busy
     Busy = 1,
@@ -154,8 +152,7 @@ impl TryFrom<u8> for ModuleError {
 
 /// Errors that can occur when operating the DFPlayer
 #[derive(Debug, Clone, Copy)]
-#[cfg(feature = "defmt")]
-#[derive(defmt::Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error<SerialError> {
     /// Initialization failed
     Init,
@@ -181,8 +178,7 @@ pub enum Error<SerialError> {
 
 /// Data structure representing a message to/from the DFPlayer
 #[derive(PartialEq, Debug, Clone, Copy)]
-#[cfg(feature = "defmt")]
-#[derive(defmt::Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct MessageData {
     command: Command,
     param_h: u8,
@@ -207,8 +203,7 @@ const ACK_MESSAGE_DATA: MessageData =
 /// Commands supported by the DFPlayer module
 #[repr(u8)]
 #[derive(PartialEq, Debug, Clone, Copy)]
-#[cfg(feature = "defmt")]
-#[derive(defmt::Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Command {
     /// Play next file
     Next = 0x01,
@@ -370,8 +365,7 @@ impl TryFrom<u8> for Command {
 /// Equalizer settings available on the DFPlayer
 #[repr(u8)]
 #[derive(Clone, Copy)]
-#[cfg(feature = "defmt")]
-#[derive(defmt::Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Equalizer {
     /// Normal (flat) equalizer setting
     Normal = 0x0,
@@ -390,8 +384,7 @@ pub enum Equalizer {
 /// Playback modes supported by the DFPlayer
 #[repr(u8)]
 #[derive(Clone, Copy)]
-#[cfg(feature = "defmt")]
-#[derive(defmt::Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum PlayBackMode {
     /// Repeat all tracks
     Repeat = 0x0,
@@ -406,8 +399,7 @@ pub enum PlayBackMode {
 /// Media sources supported by the DFPlayer
 #[repr(u8)]
 #[derive(Clone, Copy)]
-#[cfg(feature = "defmt")]
-#[derive(defmt::Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum PlayBackSource {
     /// USB storage device
     USB = 0x0,
