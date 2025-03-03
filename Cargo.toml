@@ -14,7 +14,6 @@ authors = ["José Morales <josfemova@gmail.com>"]
 [dependencies]
 embedded-io-async = "0.6"
 embedded-hal-async = "1.0.0"
-embassy-time = "0.4.0"
 
 defmt = { version = "0.3.10", optional = true }
 
