@@ -1,6 +1,6 @@
 # DFPlayer Mini Examples
 
-This directory contains examples demonstrating use of the MPU9250 sensor.
+This directory contains examples demonstrating use of the DFPlayer driver using Raspberry Pi Pico 2 (rp2350) and Embassy.
 
 ## Examples
 
@@ -9,5 +9,6 @@ This directory contains examples demonstrating use of the MPU9250 sensor.
 Basic example showing how to:
 
 - Initialize the module
-- Perform a number of playback and volume control operations
-- Use busy pin
+- Set volume and equalizer
+- Play a track
+- Use busy pin in a loop to play subsequent tracks once the current track has finished

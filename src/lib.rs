@@ -65,7 +65,6 @@ const MSG_LEN: u8 = 0x06;
 const DATA_FRAME_SIZE: usize = 10;
 
 // Message byte indices
-const INDEX_START_BYTE: usize = 0;
 const INDEX_VERSION: usize = 1;
 const INDEX_CMD: usize = 3;
 const INDEX_FEEDBACK_ENABLE: usize = 4;
@@ -73,9 +72,8 @@ const INDEX_PARAM_H: usize = 5;
 const INDEX_PARAM_L: usize = 6;
 const INDEX_CHECKSUM_H: usize = 7;
 const INDEX_CHECKSUM_L: usize = 8;
-const INDEX_END_BYTE: usize = 9;
 
-/// Minimal time provider trait for timeout tracking
+/// Minimal time provider trait for timeout tracking. Implement this for your platform.
 pub trait TimeSource {
     /// Monotonic time point type
     type Instant: Copy + Clone + PartialEq + PartialOrd;
@@ -88,8 +86,10 @@ pub trait TimeSource {
 }
 
 /// Represents available media sources on the DFPlayer
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(u8)]
+#[cfg(feature = "defmt")]
+#[derive(defmt::Format)]
 pub enum Source {
     /// Internal USB flash storage
     USBFlash = 0b001,
@@ -112,7 +112,7 @@ impl TryFrom<u8> for Source {
 }
 
 /// Error codes reported by the DFPlayer module
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 #[cfg(feature = "defmt")]
 #[derive(defmt::Format)]
@@ -153,7 +153,7 @@ impl TryFrom<u8> for ModuleError {
 }
 
 /// Errors that can occur when operating the DFPlayer
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[cfg(feature = "defmt")]
 #[derive(defmt::Format)]
 pub enum Error<SerialError> {
@@ -205,8 +205,8 @@ const ACK_MESSAGE_DATA: MessageData =
     MessageData::new(Command::NotifyReply, 0, 0);
 
 /// Commands supported by the DFPlayer module
-#[derive(PartialEq, Debug, Clone, Copy)]
 #[repr(u8)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 #[cfg(feature = "defmt")]
 #[derive(defmt::Format)]
 pub enum Command {
@@ -369,6 +369,9 @@ impl TryFrom<u8> for Command {
 
 /// Equalizer settings available on the DFPlayer
 #[repr(u8)]
+#[derive(Clone, Copy)]
+#[cfg(feature = "defmt")]
+#[derive(defmt::Format)]
 pub enum Equalizer {
     /// Normal (flat) equalizer setting
     Normal = 0x0,
@@ -386,6 +389,9 @@ pub enum Equalizer {
 
 /// Playback modes supported by the DFPlayer
 #[repr(u8)]
+#[derive(Clone, Copy)]
+#[cfg(feature = "defmt")]
+#[derive(defmt::Format)]
 pub enum PlayBackMode {
     /// Repeat all tracks
     Repeat = 0x0,
@@ -399,6 +405,9 @@ pub enum PlayBackMode {
 
 /// Media sources supported by the DFPlayer
 #[repr(u8)]
+#[derive(Clone, Copy)]
+#[cfg(feature = "defmt")]
+#[derive(defmt::Format)]
 pub enum PlayBackSource {
     /// USB storage device
     USB = 0x0,
@@ -979,7 +988,7 @@ where
     ///
     /// # Arguments
     /// * `enable` - Whether to enable looping of all tracks
-    pub async fn loop_all(
+    pub async fn set_loop_all(
         &mut self,
         enable: bool,
     ) -> Result<(), Error<S::Error>> {
@@ -1039,7 +1048,7 @@ where
         folder: u8,
         track: u8,
     ) -> Result<(), Error<S::Error>> {
-        if folder == 0 || folder > 99 || track == 0 || track > 255 {
+        if folder == 0 || folder > 99 || track == 0 {
             return Err(Error::BadParameter);
         }
 
@@ -1065,7 +1074,7 @@ where
     ///
     /// # Arguments
     /// * `enable` - Whether to enable looping of the current track
-    pub async fn loop_current_track(
+    pub async fn set_loop_current_track(
         &mut self,
         enable: bool,
     ) -> Result<(), Error<S::Error>> {
