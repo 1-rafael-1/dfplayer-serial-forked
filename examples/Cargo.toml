@@ -7,6 +7,10 @@ edition = "2024"
 name = "basic"
 path = "src/basic.rs"
 
+[[example]]
+name = "query"
+path = "src/query.rs"
+
 [dependencies]
 embassy-rp = { version = "0.3.1", features = [
     "defmt",
@@ -36,4 +40,4 @@ embedded-io-async = "0.6.1"
 static_cell = "2.1.0"
 
 # dependency to dfplayer-serial crate in the parent directory, with defmt feature enabled
-dfplayer-serial = { path = "..", features = ["defmt"] }
+dfplayer-serial = { path = "..", features = [] }

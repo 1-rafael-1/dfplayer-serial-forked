@@ -1,5 +1,5 @@
 //! Basic Embassy example for the Raspberry Pi Pico 2
-//! Showcase some basic DFPlayer Mini commands
+//! Showcase querying things from the DFPlayer Mini
 //!
 //! Assumes the following connections:
 //!
@@ -28,7 +28,6 @@ use embassy_rp::{
     bind_interrupts,
     block::ImageDef,
     config::Config,
-    gpio::{Input, Pull},
     peripherals::UART0,
     uart::{
         BufferedInterruptHandler, BufferedUart, Config as UartConfig, DataBits,
@@ -55,8 +54,6 @@ async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Config::default());
 
     // Initialize the DFPlayer Mini
-    // The modules usually have a busy pin that can be used to determine if the module is currently playing audio. Low if busy, high if not busy.
-    let mut busy = Input::new(p.PIN_18, Pull::None);
 
     // We need a UART port to communicate with the DFPlayer Mini, defaults should be fine. But these valuesHere do work:
     let mut uart_config = UartConfig::default();
@@ -65,8 +62,10 @@ async fn main(_spawner: Spawner) {
     uart_config.stop_bits = StopBits::STOP1;
     uart_config.parity = Parity::ParityNone;
 
-    // Create a buffered UART instance. Technically each command can be sent/received with 10 bytes, but we will need some extra space for handling incomplete commands.
-    // You should in theory be able to go down as much as 16 bytes, but the DFPlayer Mini is not very reliable in that regard. Be prepared to increase the buffer size if you encounter issues.
+    // Create a buffered UART instance.
+    // Buffer size for query commands must be way bigger than what we need for the other commands. The DFPlayer Mini is finnicky with timing and will sometimes send responses in multiple chunks.
+    // Also we sometimes see responses transmitted in kind of random order, forcing the driver to buffer the responses until we find the one we expect.
+    // In this example here 32 bytes is not enough, we see frequent issues with the query commands. 64 bytes seems to work fine here.
     static TX_BUF: StaticCell<[u8; 64]> = StaticCell::new();
     let tx_buf = &mut TX_BUF.init([0; 64])[..];
     static RX_BUF: StaticCell<[u8; 64]> = StaticCell::new();
@@ -82,7 +81,7 @@ async fn main(_spawner: Spawner) {
     );
 
     // now we can create the DFPlayer Mini instance. See driver documentation for more information on the parameters.
-    let feedback_enable = true;
+    let feedback_enable = false;
     let timeout_ms = 1000;
     let delay = Delay;
     let reset_duration_override = None;
@@ -121,45 +120,56 @@ async fn main(_spawner: Spawner) {
         }
     };
 
+    // Wait for the DFPlayer Mini to initialize
+    Timer::after(Duration::from_millis(500)).await;
+
     // Now we can start sending commands to the DFPlayer Mini
-    // Set the volume to 5, because we tinker late at night and don't want to wake up the neighbors
-    let volume = 5u8;
-    match dfplayer.set_volume(volume).await {
-        Ok(_) => info!("Volume {} set successfully", volume),
-        Err(e) => error!("Failed to set volume: {}", Debug2Format(&e)),
+
+    // Get the number of tracks on the SD card
+    info!("Querying number of tracks on SD card...");
+    match dfplayer.query_tracks_sd().await {
+        Ok(tracks) => info!("Number of tracks on SD card: {}", tracks),
+        Err(e) => error!(
+            "Failed to query number of tracks on SD card: {}",
+            Debug2Format(&e)
+        ),
     }
 
-    // Set the equalizer to rock
-    let eq = Equalizer::Rock;
-    match dfplayer.set_equalizer(eq).await {
-        Ok(_) => info!("Equalizer set to {} successfully", Debug2Format(&eq)),
-        Err(e) => error!("Failed to set equalizer: {}", Debug2Format(&e)),
-    }
-
-    // Try to play the first track
-    let track = 1u16;
-    match dfplayer.play(1).await {
-        Ok(_) => info!("Play track {} command sent successfully", track),
-        Err(e) => error!("Failed to play track: {}", Debug2Format(&e)),
-    }
-
+    // The DFPlayer can be finnicky with timing, so we wait a bit before sending the next command
     Timer::after(Duration::from_millis(100)).await;
 
-    // Main loop
-    info!("Entering main loop");
-    loop {
-        // Wait for the busy pin to go high, indicating the DFPlayer Mini is not busy. In our case here meaning it should have stopped playing the track.
-        busy.wait_for_high().await;
-        info!("Finished playing track, playing next track");
-        Timer::after(Duration::from_millis(100)).await;
-
-        // Send the next track command
-        match dfplayer.next().await {
-            Ok(_) => info!("Next track command sent successfully"),
-            Err(e) => error!(
-                "Failed to send next track command: {}",
-                Debug2Format(&e)
-            ),
+    // get the current equalizer setting
+    info!("Querying current equalizer setting...");
+    match dfplayer.query_eq().await {
+        Ok(eq) => {
+            let equalizer: Equalizer = match eq {
+                0 => Equalizer::Normal,
+                1 => Equalizer::Pop,
+                2 => Equalizer::Rock,
+                3 => Equalizer::Jazz,
+                4 => Equalizer::Classic,
+                5 => Equalizer::Bass,
+                6..=u8::MAX => Equalizer::Normal,
+            };
+            info!("Current equalizer setting: {}", Debug2Format(&equalizer)); // Equalizer does not implement Debug itself
+        }
+        Err(e) => {
+            error!("Failed to query equalizer setting: {}", Debug2Format(&e))
         }
     }
+
+    // The DFPlayer can be finnicky with timing, so we wait a bit before sending the next command
+    Timer::after(Duration::from_millis(100)).await;
+
+    // get the current volume setting
+    info!("Querying current volume setting...");
+    match dfplayer.query_volume().await {
+        Ok(volume) => info!("Current volume setting: {}", volume),
+        Err(e) => {
+            error!("Failed to query volume setting: {}", Debug2Format(&e))
+        }
+    }
+
+    // Finish here
+    info!("Finished querying DFPlayer Mini");
 }
