@@ -364,7 +364,7 @@ impl TryFrom<u8> for Command {
 
 /// Equalizer settings available on the DFPlayer
 #[repr(u8)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Equalizer {
     /// Normal (flat) equalizer setting
@@ -383,7 +383,7 @@ pub enum Equalizer {
 
 /// Playback modes supported by the DFPlayer
 #[repr(u8)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum PlayBackMode {
     /// Repeat all tracks
@@ -398,7 +398,7 @@ pub enum PlayBackMode {
 
 /// Media sources supported by the DFPlayer
 #[repr(u8)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum PlayBackSource {
     /// USB storage device
@@ -505,9 +505,9 @@ where
         let original_timeout = player.timeout_ms;
         player.timeout_ms = 2000; // Longer timeout for reset
 
-        // Send the reset command
-        let reset_result = player
-            .send_command(MessageData::new(Command::Reset, 0, 0))
+        // Send the reset command using the special init version that won't hang
+        let _reset_result = player
+            .send_command_init(MessageData::new(Command::Reset, 0, 0))
             .await;
 
         // Wait for device reset regardless of command result
@@ -523,37 +523,49 @@ where
         player.timeout_ms = original_timeout;
 
         // Continue even if reset command had issues
-        if let Err(e) = reset_result {
+        if let Err(_e) = _reset_result {
             #[cfg(feature = "defmt")]
-            info!("Reset error: {:?} - continuing anyway", Debug2Format(&e));
+            info!("Reset error: {:?} - continuing anyway", Debug2Format(&_e));
         }
 
         // Configure SD card as the default media source
         #[cfg(feature = "defmt")]
         info!("Setting playback source to SD card");
 
-        // Try to select SD card source, but continue even if it fails
-        let source_result =
-            player.set_playback_source(PlayBackSource::SDCard).await;
-        if let Err(e) = source_result {
+        // Use the special init command here too
+        let _source_result = player
+            .send_command_init(MessageData::new(
+                Command::SetPlaybackSource,
+                0,
+                PlayBackSource::SDCard as u8,
+            ))
+            .await;
+
+        if let Err(_e) = _source_result {
             #[cfg(feature = "defmt")]
             info!(
                 "Source select warning: {:?} - continuing anyway",
-                Debug2Format(&e)
+                Debug2Format(&_e)
             );
         }
+
+        // Add a delay after source selection
+        player.delay.delay_ms(200).await;
 
         // Set initial volume to a moderate level
         #[cfg(feature = "defmt")]
         info!("Setting initial volume");
 
-        // Set volume to 15 (half scale)
-        let vol_result = player.set_volume(15).await;
-        if let Err(e) = vol_result {
+        // Use the special init command here too
+        let _vol_result = player
+            .send_command_init(MessageData::new(Command::SetVolume, 0, 15))
+            .await;
+
+        if let Err(_e) = _vol_result {
             #[cfg(feature = "defmt")]
             info!(
                 "Volume set warning: {:?} - continuing anyway",
-                Debug2Format(&e)
+                Debug2Format(&_e)
             );
         }
 
@@ -570,10 +582,11 @@ where
     /// complete messages from potentially fragmented reads, with proper timeout
     /// handling and error recovery.
     ///
-    /// Special handling is provided for reset commands, which often don't receive responses.
+    /// Special handling is provided for reset commands and 8-byte response formats
+    /// that sometimes occur in feedback mode.
     ///
-    /// Returns `Ok(())` if a valid message was received and processed, or an error
-    /// otherwise. If a module error response was received, returns that specific error.
+    /// Returns `Ok(())` if a valid message was received and processed, or an error.
+    /// If a module error response was received, returns that specific error.
     pub async fn read_last_message(&mut self) -> Result<(), Error<S::Error>> {
         let timeout_start = self.time_source.now();
 
@@ -588,9 +601,12 @@ where
             let bytes_read = match self.port.read_ready() {
                 Ok(true) => match self.port.read(&mut receive_buffer).await {
                     Ok(n) => n,
-                    Err(e) => {
+                    Err(_e) => {
                         #[cfg(feature = "defmt")]
-                        info!("Read error, will retry: {:?}", Debug2Format(&e));
+                        info!(
+                            "Read error, will retry: {:?}",
+                            Debug2Format(&_e)
+                        );
                         self.delay.delay_ms(10).await;
                         continue;
                     }
@@ -607,9 +623,9 @@ where
                             }
                             n
                         }
-                        Err(e) => {
+                        Err(_e) => {
                             #[cfg(feature = "defmt")]
-                            info!("Read error: {:?}", Debug2Format(&e));
+                            info!("Read error: {:?}", Debug2Format(&_e));
                             self.delay.delay_ms(10).await;
                             continue;
                         }
@@ -624,6 +640,32 @@ where
                     bytes_read,
                     &receive_buffer[..bytes_read]
                 );
+            }
+
+            // Special pattern for feedback mode, second responses: 8-byte response format
+            // The DFPlayer sometimes sends truncated 8-byte messages instead of the standard
+            // 10-byte format, particularly for second responses when feedback is enabled.
+            // This appears to be an undocumented protocol quirk of the module.
+            if bytes_read == 8 && receive_buffer[0] == 0x06 {
+                // This looks like a truncated response with the command at index 1
+                let cmd_byte = receive_buffer[1];
+
+                // Try to convert command byte
+                if let Ok(cmd) = Command::try_from(cmd_byte) {
+                    self.last_response.command = cmd;
+                    self.last_response.param_h = receive_buffer[3];
+                    self.last_response.param_l = receive_buffer[4];
+
+                    #[cfg(feature = "defmt")]
+                    info!(
+                        "Parsed 8-byte response: cmd={:?}, params={},{}",
+                        cmd,
+                        self.last_response.param_h,
+                        self.last_response.param_l
+                    );
+
+                    return Ok(());
+                }
             }
 
             // Process each byte through our state machine
@@ -654,7 +696,7 @@ where
 
                             if read_checksum == calc_checksum {
                                 // Valid message - extract command and parameters
-                                if let Ok(cmd) = message[3].try_into() {
+                                if let Ok(cmd) = Command::try_from(message[3]) {
                                     self.last_response.command = cmd;
                                     self.last_response.param_h = message[5];
                                     self.last_response.param_l = message[6];
@@ -668,11 +710,9 @@ where
                                     if self.last_response.command
                                         == Command::NotifyError
                                     {
-                                        if let Ok(err) = self
-                                            .last_response
-                                            .param_l
-                                            .try_into()
-                                        {
+                                        if let Ok(err) = ModuleError::try_from(
+                                            self.last_response.param_l,
+                                        ) {
                                             return Err(Error::ModuleError(
                                                 err,
                                             ));
@@ -720,10 +760,102 @@ where
         Err(Error::UserTimeout)
     }
 
+    /// Special version of send_command that won't fail if responses aren't received
+    ///
+    /// Used during initialization to improve reliability when the module is first starting up.
+    /// Unlike the regular send_command, this method:
+    /// - Uses shorter timeouts
+    /// - Continues even if responses aren't received
+    /// - Employs simplified error handling
+    ///
+    /// # Arguments
+    /// * `command_data` - The command and parameters to send
+    async fn send_command_init(
+        &mut self,
+        command_data: MessageData,
+    ) -> Result<(), Error<S::Error>> {
+        // Format the command message according to protocol
+        let mut out_buffer = [
+            START_BYTE, VERSION, MSG_LEN, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+            END_BYTE,
+        ];
+
+        // Set feedback flag if enabled
+        if self.feedback_enable {
+            out_buffer[INDEX_FEEDBACK_ENABLE] = 0x1;
+        }
+
+        // Set command and parameters
+        out_buffer[INDEX_CMD] = command_data.command as u8;
+        out_buffer[INDEX_PARAM_H] = command_data.param_h;
+        out_buffer[INDEX_PARAM_L] = command_data.param_l;
+
+        // Calculate and set checksum
+        let checksum = checksum(&out_buffer[INDEX_VERSION..INDEX_CHECKSUM_H]);
+        out_buffer[INDEX_CHECKSUM_H] = (checksum >> 8) as u8;
+        out_buffer[INDEX_CHECKSUM_L] = checksum as u8;
+
+        // Log the message being sent
+        #[cfg(feature = "defmt")]
+        info!("tx {}", out_buffer);
+
+        // Send the message to the device
+        self.port
+            .write_all(&out_buffer)
+            .await
+            .map_err(Error::SerialPort)?;
+
+        // Store the command for reference
+        self.last_command = command_data;
+        self.last_cmd_acknowledged = false;
+
+        // If feedback is disabled, don't even try to read a response during initialization
+        if !self.feedback_enable {
+            #[cfg(feature = "defmt")]
+            info!(
+                "Skipping response wait during initialization (feedback disabled)"
+            );
+
+            // Still need a small delay to let the command be processed
+            self.delay.delay_ms(50).await;
+            return Ok(());
+        }
+
+        // For feedback mode, use a short timeout for reading during initialization
+        let original_timeout = self.timeout_ms;
+        self.timeout_ms = 200; // Short timeout for init
+
+        // Try to read a response but don't fail if we timeout
+        let result = self.read_last_message().await;
+
+        // Restore original timeout
+        self.timeout_ms = original_timeout;
+
+        // During initialization, continue even if we get a timeout
+        match result {
+            Ok(_) => {
+                #[cfg(feature = "defmt")]
+                info!("Initialization command received response");
+            }
+            Err(Error::UserTimeout) => {
+                #[cfg(feature = "defmt")]
+                info!("Initialization command timed out (continuing anyway)");
+            }
+            Err(_e) => {
+                #[cfg(feature = "defmt")]
+                info!("Initialization command error: {:?}", Debug2Format(&_e));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Send a command to the DFPlayer module
     ///
     /// This constructs a properly formatted message, sends it to the device,
     /// and then waits for a response or acknowledgement if feedback is enabled.
+    /// For query commands in non-feedback mode, attempts to read and process responses
+    /// with multiple retries if needed.
     ///
     /// The method calculates the appropriate checksum and handles all aspects of
     /// the binary communication protocol.
@@ -767,27 +899,168 @@ where
 
         // Store the command for reference
         self.last_command = command_data;
-
-        // Reset acknowledgment flag before reading response
         self.last_cmd_acknowledged = false;
 
-        // Wait for and process the response
-        self.read_last_message().await?;
+        // Determine if this is a query command
+        let is_query_command = matches!(
+            command_data.command,
+            Command::QueryTrackCntSD
+                | Command::QueryVolume
+                | Command::QueryEQ
+                | Command::QueryAvailableSources
+                | Command::QueryStatus
+                | Command::QueryTrackCntUSB
+                | Command::QueryCurrentTrackUSBFlash
+                | Command::QueryCurrentTrackSD
+                | Command::QueryCurrentTrackUSBHost
+                | Command::QueryFolderTrackCnt
+                | Command::QueryFolderCnt
+        );
 
-        // Check for acknowledgement if feedback is enabled
-        if self.feedback_enable && (command_data.command != Command::Reset) {
-            if !self.last_cmd_acknowledged {
-                #[cfg(feature = "defmt")]
-                info!(
-                    "Expected ACK not received: {} {}",
-                    self.last_command, self.last_response
-                );
-                return Err(Error::FailedAck);
+        // Different handling based on feedback mode
+        if self.feedback_enable {
+            // With feedback enabled, we expect an ACK followed by data for queries
+
+            // First read for ACK
+            match self.read_last_message().await {
+                Ok(_) if self.last_cmd_acknowledged => {
+                    // ACK received, now we need the data response for queries
+                    if is_query_command {
+                        #[cfg(feature = "defmt")]
+                        info!("Reading data response after ACK for query");
+
+                        // Read the data response - use a short delay if needed
+                        self.delay.delay_ms(20).await;
+
+                        match self.read_last_message().await {
+                            Ok(_) => {
+                                #[cfg(feature = "defmt")]
+                                info!("Received data response for query");
+                            }
+                            Err(e) => {
+                                #[cfg(feature = "defmt")]
+                                info!(
+                                    "Error reading data response: {:?}",
+                                    Debug2Format(&e)
+                                );
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Response but no ACK
+                    if command_data.command != Command::Reset {
+                        #[cfg(feature = "defmt")]
+                        info!("Expected ACK not received");
+                        return Err(Error::FailedAck);
+                    }
+                }
+                Err(e) => return Err(e),
             }
         } else {
-            // Check for more data (needed for certain commands)
-            if let Ok(true) = self.port.read_ready() {
-                let _ = self.read_last_message().await;
+            // In non-feedback mode, we need to read the response for query commands
+
+            if is_query_command {
+                // Wait a bit longer for the device to respond
+                self.delay.delay_ms(100).await;
+
+                // Try to read the complete response with retries for fragmented messages
+                let mut attempts = 0;
+                let max_attempts = 3;
+
+                while attempts < max_attempts {
+                    attempts += 1;
+
+                    // Try to read a response
+                    let mut buffer = [0u8; 32]; // Larger buffer to catch more data
+                    let bytes_read = match self.port.read(&mut buffer).await {
+                        Ok(n) => n,
+                        Err(e) => {
+                            #[cfg(feature = "defmt")]
+                            info!("Read error: {:?}", Debug2Format(&e));
+                            if attempts == max_attempts {
+                                return Err(Error::SerialPort(e));
+                            }
+                            self.delay.delay_ms(50).await;
+                            continue;
+                        }
+                    };
+
+                    #[cfg(feature = "defmt")]
+                    if bytes_read > 0 {
+                        info!(
+                            "Response (attempt {}): {:?}",
+                            attempts,
+                            &buffer[..bytes_read]
+                        );
+                    }
+
+                    // Check if we have a complete message
+                    if bytes_read >= DATA_FRAME_SIZE
+                        && buffer[0] == START_BYTE
+                        && buffer[DATA_FRAME_SIZE - 1] == END_BYTE
+                    {
+                        // Try to extract command and check
+                        if let Ok(cmd) = Command::try_from(buffer[INDEX_CMD]) {
+                            // Update last response
+                            self.last_response.command = cmd;
+                            self.last_response.param_h = buffer[INDEX_PARAM_H];
+                            self.last_response.param_l = buffer[INDEX_PARAM_L];
+
+                            // For track count, accept any valid response
+                            if command_data.command == Command::QueryTrackCntSD
+                            {
+                                #[cfg(feature = "defmt")]
+                                info!(
+                                    "Got response for track count query: {:?}, value={}",
+                                    cmd, buffer[INDEX_PARAM_L]
+                                );
+                                return Ok(());
+                            }
+
+                            // For other commands, verify it matches what we sent
+                            if cmd == command_data.command {
+                                #[cfg(feature = "defmt")]
+                                info!(
+                                    "Got matching response: {:?}, value={}",
+                                    cmd, buffer[INDEX_PARAM_L]
+                                );
+                                return Ok(());
+                            } else {
+                                #[cfg(feature = "defmt")]
+                                info!(
+                                    "Response command mismatch: expected {:?}, got {:?}",
+                                    command_data.command, cmd
+                                );
+                            }
+                        }
+                    }
+
+                    // If we didn't get a complete message, wait and try again
+                    if attempts < max_attempts {
+                        self.delay.delay_ms(50).await;
+                    }
+                }
+
+                // Special case: for track count query, don't fail if we'll check for delayed response
+                if command_data.command == Command::QueryTrackCntSD {
+                    #[cfg(feature = "defmt")]
+                    info!(
+                        "No immediate track count response, will check for delayed response"
+                    );
+                    return Ok(());
+                }
+
+                // If we get here, we didn't get a proper response
+                #[cfg(feature = "defmt")]
+                info!(
+                    "Failed to get proper response after {} attempts",
+                    max_attempts
+                );
+                return Err(Error::BrokenMessage);
+            } else {
+                // For non-query commands in non-feedback mode, we don't need to wait for a response
             }
         }
 
@@ -800,8 +1073,9 @@ where
     /// without blocking indefinitely. It uses non-blocking I/O patterns to avoid
     /// hanging when no data is available.
     ///
-    /// This is used during initialization and after certain commands to ensure
-    /// a clean state for subsequent communications.
+    /// This is critical during initialization and after certain commands to ensure
+    /// a clean communication state and prevent misinterpreting stale data as responses
+    /// to new commands.
     async fn clear_receive_buffer(&mut self) -> Result<(), Error<S::Error>> {
         let mut buffer = [0u8; 32];
         let start = self.time_source.now();
@@ -830,15 +1104,15 @@ where
                     // No data was actually read
                     self.delay.delay_ms(10).await;
                 }
-                Ok(n) => {
+                Ok(_n) => {
                     #[cfg(feature = "defmt")]
-                    info!("Cleared {} bytes: {:?}", n, &buffer[..n]);
+                    info!("Cleared {} bytes: {:?}", n, &buffer[.._n]);
                     // Short delay and try again
                     self.delay.delay_ms(10).await;
                 }
-                Err(e) => {
+                Err(_e) => {
                     #[cfg(feature = "defmt")]
-                    info!("Clear buffer read error: {:?}", Debug2Format(&e));
+                    info!("Clear buffer read error: {:?}", Debug2Format(&_e));
                     self.delay.delay_ms(10).await;
                 }
             }
@@ -1080,15 +1354,101 @@ where
 
     /// Query the total number of tracks on the SD card
     ///
-    /// Returns the number of tracks on the SD card or an error.
+    /// Returns the number of tracks on the SD card.
+    ///
+    /// This method implements a robust strategy for obtaining track counts:
+    /// - Sends the query command and processes immediate responses
+    /// - For non-feedback mode, waits for delayed responses with multiple attempts
+    /// - Returns 0 if no tracks are found or the count couldn't be retrieved
+    ///
+    /// The track count retrieval is one of the most timing-sensitive operations
+    /// of the DFPlayer module and may require multiple attempts.
     pub async fn query_tracks_sd(&mut self) -> Result<u16, Error<S::Error>> {
-        self.send_command(MessageData::new(Command::QueryTrackCntSD, 0, 0))
-            .await?;
+        // Send the command
+        let result = self
+            .send_command(MessageData::new(Command::QueryTrackCntSD, 0, 0))
+            .await;
 
-        // Extract the track count from the response
-        let count = ((self.last_response.param_h as u16) << 8)
-            | (self.last_response.param_l as u16);
-        Ok(count)
+        // If we got a command error that wasn't BrokenMessage, return it
+        if let Err(e) = result {
+            match e {
+                Error::BrokenMessage => {
+                    // We'll continue and try to get a delayed response
+                    #[cfg(feature = "defmt")]
+                    info!(
+                        "Initial track count query failed, trying delayed response"
+                    );
+                }
+                _ => return Err(e),
+            }
+        }
+
+        // If we're in non-feedback mode, wait for delayed response
+        if !self.feedback_enable {
+            // Wait longer for delayed response - often track count takes a while
+            self.delay.delay_ms(500).await;
+
+            // Try to read the delayed response with multiple attempts
+            for attempt in 1..=3 {
+                let mut buffer = [0u8; 32];
+                let bytes_read = match self.port.read(&mut buffer).await {
+                    Ok(n) => n,
+                    Err(_) => {
+                        // If we can't read, wait and try again
+                        self.delay.delay_ms(100).await;
+                        continue;
+                    }
+                };
+
+                #[cfg(feature = "defmt")]
+                if bytes_read > 0 {
+                    info!(
+                        "Delayed response (attempt {}): {:?}",
+                        attempt,
+                        &buffer[..bytes_read]
+                    );
+                }
+
+                // Check for track count response in the buffer
+                for i in 0..bytes_read.saturating_sub(9) {
+                    if buffer[i] == START_BYTE
+                        && buffer[i + INDEX_CMD]
+                            == Command::QueryTrackCntSD as u8
+                        && buffer[i + 9] == END_BYTE
+                    {
+                        // Found track count response
+                        let track_count = buffer[i + INDEX_PARAM_L];
+
+                        #[cfg(feature = "defmt")]
+                        info!("Found delayed track count: {}", track_count);
+
+                        // Update last_response
+                        self.last_response.command = Command::QueryTrackCntSD;
+                        self.last_response.param_h = buffer[i + INDEX_PARAM_H];
+                        self.last_response.param_l = track_count;
+
+                        return Ok(track_count as u16);
+                    }
+                }
+
+                // If we didn't find a response, wait and try again
+                if attempt < 3 {
+                    self.delay.delay_ms(150).await;
+                }
+            }
+        }
+
+        // If we have a track count response, use it
+        if self.last_response.command == Command::QueryTrackCntSD {
+            return Ok(self.last_response.param_l as u16);
+        }
+
+        // No valid track count found
+        #[cfg(feature = "defmt")]
+        info!("Failed to get track count after multiple attempts");
+
+        // For the special case of no tracks found, return 0
+        Ok(0)
     }
 
     /// Query the current volume setting
@@ -1097,17 +1457,15 @@ where
     pub async fn query_volume(&mut self) -> Result<u8, Error<S::Error>> {
         self.send_command(MessageData::new(Command::QueryVolume, 0, 0))
             .await?;
-
         Ok(self.last_response.param_l)
     }
 
     /// Query the current equalizer setting
     ///
-    /// Returns the current equalizer setting or an error.
+    /// Returns the current equalizer setting (0-5) or an error.
     pub async fn query_eq(&mut self) -> Result<u8, Error<S::Error>> {
         self.send_command(MessageData::new(Command::QueryEQ, 0, 0))
             .await?;
-
         Ok(self.last_response.param_l)
     }
 }
